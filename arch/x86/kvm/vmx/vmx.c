@@ -28,6 +28,8 @@
 #include <linux/tboot.h>
 #include <linux/trace_events.h>
 #include <linux/entry-kvm.h>
+#include <linux/types.h>
+#include <linux/atomic.h>
 
 #include <asm/apic.h>
 #include <asm/asm.h>
@@ -68,6 +70,10 @@
 
 MODULE_AUTHOR("Qumranet");
 MODULE_LICENSE("GPL");
+
+extern atomic64_t exit_counters;
+extern atomic64_t exit_duration;
+extern atomic64_t individual_exit_counter[69];
 
 #ifdef MODULE
 static const struct x86_cpu_id vmx_cpu_id[] = {
@@ -5869,6 +5875,14 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 	u32 vectoring_info = vmx->idt_vectoring_info;
 	u16 exit_handler_index;
 
+
+		u64 start_time=rdtsc();
+	atomic64_inc(&exit_counters);
+	
+	
+		atomic64_inc(&individual_exit_counter[(u16)exit_reason.basic]);
+
+
 	/*
 	 * Flush logged GPAs PML buffer, this will make dirty_bitmap more
 	 * updated. Another good is, in kvm_vm_ioctl_get_dirty_log, before
@@ -5890,9 +5904,10 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 		return -EIO;
 
 	/* If guest state is invalid, start emulating */
-	if (vmx->emulation_required)
+	if (vmx->emulation_required){
+		atomic64_add(rdtsc() - start_time, &exit_duration);
 		return handle_invalid_guest_state(vcpu);
-
+	}
 	if (is_guest_mode(vcpu)) {
 		/*
 		 * PML is never enabled when running L2, bail immediately if a
@@ -5914,8 +5929,10 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 		 */
 		nested_mark_vmcs12_pages_dirty(vcpu);
 
-		if (nested_vmx_reflect_vmexit(vcpu))
+		if (nested_vmx_reflect_vmexit(vcpu)){
+			atomic64_add(rdtsc() - start_time, &exit_duration);
 			return 1;
+		}
 	}
 
 	if (exit_reason.failed_vmentry) {
@@ -5924,6 +5941,7 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 		vcpu->run->fail_entry.hardware_entry_failure_reason
 			= exit_reason.full;
 		vcpu->run->fail_entry.cpu = vcpu->arch.last_vmentry_cpu;
+		atomic64_add(rdtsc() - start_time, &exit_duration);
 		return 0;
 	}
 
@@ -5933,6 +5951,7 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 		vcpu->run->fail_entry.hardware_entry_failure_reason
 			= vmcs_read32(VM_INSTRUCTION_ERROR);
 		vcpu->run->fail_entry.cpu = vcpu->arch.last_vmentry_cpu;
+		atomic64_add(rdtsc() - start_time, &exit_duration);
 		return 0;
 	}
 
@@ -5962,6 +5981,7 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 		}
 		vcpu->run->internal.data[ndata++] = vcpu->arch.last_vmentry_cpu;
 		vcpu->run->internal.ndata = ndata;
+		atomic64_add(rdtsc() - start_time, &exit_duration);
 		return 0;
 	}
 
@@ -6009,6 +6029,7 @@ static int __vmx_handle_exit(struct kvm_vcpu *vcpu, fastpath_t exit_fastpath)
 	if (!kvm_vmx_exit_handlers[exit_handler_index])
 		goto unexpected_vmexit;
 
+	atomic64_add(rdtsc() - start_time, &exit_duration);
 	return kvm_vmx_exit_handlers[exit_handler_index](vcpu);
 
 unexpected_vmexit:
@@ -6021,6 +6042,7 @@ unexpected_vmexit:
 	vcpu->run->internal.ndata = 2;
 	vcpu->run->internal.data[0] = exit_reason.full;
 	vcpu->run->internal.data[1] = vcpu->arch.last_vmentry_cpu;
+	atomic64_add(rdtsc() - start_time, &exit_duration);
 	return 0;
 }
 
